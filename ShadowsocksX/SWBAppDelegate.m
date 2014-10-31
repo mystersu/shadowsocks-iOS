@@ -8,18 +8,26 @@
 
 #import "GZIP.h"
 #import "SWBConfigWindowController.h"
+#import "SWBQRCodeWindowController.h"
 #import "SWBAppDelegate.h"
 #import "GCDWebServer.h"
 #import "ShadowsocksRunner.h"
 
 #define kShadowsocksIsRunningKey @"ShadowsocksIsRunning"
+#define kShadowsocksRunningModeKey @"ShadowsocksMode"
 #define kShadowsocksHelper @"/Library/Application Support/ShadowsocksX/shadowsocks_sysconf"
+#define kSysconfVersion @"1.0.0"
 
 @implementation SWBAppDelegate {
     SWBConfigWindowController *configWindowController;
+    SWBQRCodeWindowController *qrCodeWindowController;
     NSMenuItem *statusMenuItem;
     NSMenuItem *enableMenuItem;
+    NSMenuItem *autoMenuItem;
+    NSMenuItem *globalMenuItem;
+    NSMenuItem *qrCodeMenuItem;
     BOOL isRunning;
+    NSString *runningMode;
     NSData *originalPACData;
     FSEventStreamRef fsEventStream;
     NSString *configPath;
@@ -51,15 +59,27 @@ static SWBAppDelegate *appDelegate;
     self.item.highlightMode = YES;
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Shadowsocks"];
     [menu setMinimumWidth:200];
-    statusMenuItem = [[NSMenuItem alloc] initWithTitle:_L(Shadowsocks: On) action:nil keyEquivalent:@""];
-//    [statusMenuItem setEnabled:NO];
+    
+    statusMenuItem = [[NSMenuItem alloc] initWithTitle:_L(Shadowsocks Off) action:nil keyEquivalent:@""];
+    
     enableMenuItem = [[NSMenuItem alloc] initWithTitle:_L(Turn Shadowsocks Off) action:@selector(toggleRunning) keyEquivalent:@""];
+//    [statusMenuItem setEnabled:NO];
+    autoMenuItem = [[NSMenuItem alloc] initWithTitle:_L(Auto Proxy Mode) action:@selector(enableAutoProxy) keyEquivalent:@""];
 //    [enableMenuItem setState:1];
+    globalMenuItem = [[NSMenuItem alloc] initWithTitle:_L(Global Mode) action:@selector(enableGlobal)
+        keyEquivalent:@""];
+    
     [menu addItem:statusMenuItem];
     [menu addItem:enableMenuItem];
     [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItem:autoMenuItem];
+    [menu addItem:globalMenuItem];
+    
+    [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:_L(Open Server Preferences...) action:@selector(showConfigWindow) keyEquivalent:@""];
-    [menu addItemWithTitle:_L(Edit PAC...) action:@selector(editPAC) keyEquivalent:@""];
+    [menu addItemWithTitle:_L(Edit PAC for Auto Proxy Mode...) action:@selector(editPAC) keyEquivalent:@""];
+    qrCodeMenuItem = [[NSMenuItem alloc] initWithTitle:_L(Show QR Code...) action:@selector(showQRCode) keyEquivalent:@""];
+    [menu addItem:qrCodeMenuItem];
     [menu addItemWithTitle:_L(Show Logs...) action:@selector(showLogs) keyEquivalent:@""];
     [menu addItemWithTitle:_L(Help) action:@selector(showHelp) keyEquivalent:@""];
     [menu addItem:[NSMenuItem separatorItem]];
@@ -69,6 +89,7 @@ static SWBAppDelegate *appDelegate;
     [self initializeProxy];
 
     configWindowController = [[SWBConfigWindowController alloc] initWithWindowNibName:@"ConfigWindow"];
+    configWindowController.delegate = self;
 
     [self updateMenu];
 
@@ -86,10 +107,18 @@ static SWBAppDelegate *appDelegate;
     }
 }
 
-- (void)toggleRunning {
-    [self toggleSystemProxy:!isRunning];
-    [[NSUserDefaults standardUserDefaults] setBool:isRunning forKey:kShadowsocksIsRunningKey];
+- (void)enableAutoProxy {
+    runningMode = @"auto";
+    [[NSUserDefaults standardUserDefaults] setValue:runningMode forKey:kShadowsocksRunningModeKey];
     [self updateMenu];
+    [self reloadSystemProxy];
+}
+
+- (void)enableGlobal {
+    runningMode = @"global";
+    [[NSUserDefaults standardUserDefaults] setValue:runningMode forKey:kShadowsocksRunningModeKey];
+    [self updateMenu];
+    [self reloadSystemProxy];
 }
 
 - (void)updateMenu {
@@ -97,13 +126,27 @@ static SWBAppDelegate *appDelegate;
         statusMenuItem.title = _L(Shadowsocks: On);
         enableMenuItem.title = _L(Turn Shadowsocks Off);
         self.item.image = [NSImage imageNamed:@"menu_icon"];
-//        [enableMenuItem setState:1];
     } else {
         statusMenuItem.title = _L(Shadowsocks: Off);
         enableMenuItem.title = _L(Turn Shadowsocks On);
         self.item.image = [NSImage imageNamed:@"menu_icon_disabled"];
-//        [enableMenuItem setState:0];
     }
+    
+    if ([runningMode isEqualToString:@"auto"]) {
+        [autoMenuItem setState:1];
+        [globalMenuItem setState:0];
+    } else if([runningMode isEqualToString:@"global"]) {
+        [autoMenuItem setState:0];
+        [globalMenuItem setState:1];
+    }
+    if ([ShadowsocksRunner isUsingPublicServer]) {
+        [qrCodeMenuItem setTarget:nil];
+        [qrCodeMenuItem setAction:NULL];
+    } else {
+        [qrCodeMenuItem setTarget:self];
+        [qrCodeMenuItem setAction:@selector(showQRCode)];
+    }
+
 }
 
 void onPACChange(
@@ -114,10 +157,10 @@ void onPACChange(
                 const FSEventStreamEventFlags eventFlags[],
                 const FSEventStreamEventId eventIds[])
 {
-    [appDelegate reloadPAC];
+    [appDelegate reloadSystemProxy];
 }
 
-- (void)reloadPAC {
+- (void)reloadSystemProxy {
     if (isRunning) {
         [self toggleSystemProxy:NO];
         [self toggleSystemProxy:YES];
@@ -158,7 +201,20 @@ void onPACChange(
     
     NSArray *fileURLs = @[[NSURL fileURLWithPath:PACPath]];
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:fileURLs];
-} 
+}
+
+- (void)showQRCode {
+    NSURL *qrCodeURL = [ShadowsocksRunner generateSSURL];
+    if (qrCodeURL) {
+        qrCodeWindowController = [[SWBQRCodeWindowController alloc] initWithWindowNibName:@"QRCodeWindow"];
+        qrCodeWindowController.qrCode = [qrCodeURL absoluteString];
+        [qrCodeWindowController showWindow:self];
+        [NSApp activateIgnoringOtherApps:YES];
+        [qrCodeWindowController.window makeKeyAndOrderFront:nil];
+    } else {
+        // TODO
+    }
+}
 
 - (void)showLogs {
     [[NSWorkspace sharedWorkspace] launchApplication:@"/Applications/Utilities/Console.app"];
@@ -181,6 +237,10 @@ void onPACChange(
     }
 }
 
+- (void)configurationDidChange {
+    [self updateMenu];
+}
+
 - (void)runProxy {
     [ShadowsocksRunner reloadConfig];
     for (; ;) {
@@ -198,7 +258,7 @@ void onPACChange(
 
 - (void)installHelper {
     NSFileManager *fileManager = [NSFileManager defaultManager];
-    if (![fileManager fileExistsAtPath:kShadowsocksHelper]) {
+    if (![fileManager fileExistsAtPath:kShadowsocksHelper] || ![self isSysconfVersionOK]) {
         NSString *helperPath = [NSString stringWithFormat:@"%@/%@", [[NSBundle mainBundle] resourcePath], @"install_helper.sh"];
         NSLog(@"run install script: %@", helperPath);
         NSDictionary *error;
@@ -212,27 +272,76 @@ void onPACChange(
     }
 }
 
+- (BOOL)isSysconfVersionOK {
+    NSTask *task;
+    task = [[NSTask alloc] init];
+    [task setLaunchPath:kShadowsocksHelper];
+    
+    NSArray *args;
+    args = [NSArray arrayWithObjects:@"-v", nil];
+    [task setArguments: args];
+    
+    NSPipe *pipe;
+    pipe = [NSPipe pipe];
+    [task setStandardOutput:pipe];
+    
+    NSFileHandle *fd;
+    fd = [pipe fileHandleForReading];
+    
+    [task launch];
+    
+    NSData *data;
+    data = [fd readDataToEndOfFile];
+    
+    NSString *str;
+    str = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    
+    if (![str isEqualToString:kSysconfVersion]) {
+        return NO;
+    }
+    return YES;
+}
+
 - (void)initializeProxy {
+    runningMode = [self runningMode];
     id isRunningObject = [[NSUserDefaults standardUserDefaults] objectForKey:kShadowsocksIsRunningKey];
     if ((isRunningObject == nil) || [isRunningObject boolValue]) {
         [self toggleSystemProxy:YES];
     }
+    [self updateMenu];
+}
+
+- (void)toggleRunning {
+    [self toggleSystemProxy:!isRunning];
+    [[NSUserDefaults standardUserDefaults] setBool:isRunning forKey:kShadowsocksIsRunningKey];
+    [self updateMenu];
+}
+
+- (NSString *)runningMode {
+    NSString *mode = [[NSUserDefaults standardUserDefaults] stringForKey:kShadowsocksRunningModeKey];
+    if (mode) {
+        return mode;
+    }
+    return @"auto";
 }
 
 - (void)toggleSystemProxy:(BOOL)useProxy {
     isRunning = useProxy;
+    
     NSTask *task;
     task = [[NSTask alloc] init];
     [task setLaunchPath:kShadowsocksHelper];
+
     NSString *param;
     if (useProxy) {
-        param = @"on";
+        param = [self runningMode];
     } else {
         param = @"off";
     }
 
-    NSArray *arguments;
+    // this log is very important
     NSLog(@"run shadowsocks helper: %@", kShadowsocksHelper);
+    NSArray *arguments;
     arguments = [NSArray arrayWithObjects:param, nil];
     [task setArguments:arguments];
 
